@@ -41,16 +41,15 @@ Summarix AI is a PDF summarization tool that transforms long documents into clea
 ### 1. Configure API Key
 
 1. Open the app
-2. In the "Settings" tab, enter your Gemini API key
+2. In the "API Configuration" panel, enter your Gemini API key
    - Get free Gemini API key from: [aistudio.google.com/api-keys](https://aistudio.google.com/api-keys)
-3. Click "Save"
+3. Click "Save API Configuration" button
 
 ### 2. Summarize PDFs
 
-1. In the "Home" tab, upload a PDF file
-2. Select summary length
-3. Choose tone: Professional, Academic, or Simple
-4. Click "Summarize"
+1. In the "Upload Document" panel, upload a PDF file
+2. Choose tone: Simple, Academic or Executive from the top navigation bar
+3. Click "Summarize PDF" button
 
 ### 3. View Results
 
