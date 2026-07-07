@@ -5,8 +5,6 @@
 
 Summarix AI is a PDF summarization tool that transforms long documents into clear, structured summaries and extracts actionable insights.
 
-You can get free Gemini API key from here: https://aistudio.google.com/api-keys
-
 **Key Features:**
 - Upload and summarize PDF files
 - Professional, Academic, and Simple tone options
