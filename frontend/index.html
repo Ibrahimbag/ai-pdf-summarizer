@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Summarix AI — Premium PDF Summarizer & Action Extractor</title>
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="/frontend/styles.css">
+
+    <!-- FontAwesome for Premium Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+
+<body class="dark-theme">
+    <!-- Ambient Background Glows -->
+    <div class="ambient-glow glow-1"></div>
+    <div class="ambient-glow glow-2"></div>
+    <div class="ambient-glow glow-3"></div>
+
+    <div class="app-container">
+        <!-- Header -->
+        <header class="main-header">
+            <div class="logo-area">
+                <div class="logo-icon-wrapper">
+                    <i class="fa-solid fa-file-invoice-dollar logo-icon"></i>
+                </div>
+                <h1>Summarix<span>AI</span></h1>
+            </div>
+
+            <div class="header-actions">
+                <!-- Tone Selection -->
+                <div class="tone-selector-container">
+                    <span class="control-label">Tone:</span>
+                    <div class="tone-pills" id="toneSelector">
+                        <button class="tone-pill active" data-tone="simple">Simple</button>
+                        <button class="tone-pill" data-tone="academic">Academic</button>
+                        <button class="tone-pill" data-tone="executive">Executive</button>
+                    </div>
+                </div>
+
+                <!-- Settings Button -->
+                <button class="btn-icon" id="settingsToggleBtn" title="LLM Credentials Settings">
+                    <i class="fa-solid fa-sliders"></i>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Workspace Grid -->
+        <main class="workspace-grid">
+
+            <!-- Left Panel: Actions & Settings -->
+            <section class="control-panel">
+                <!-- Settings Drawer/Card (Toggled by Settings Button, open by default if API key missing) -->
+                <div class="settings-card glass-panel" id="settingsPanel">
+                    <div class="settings-header">
+                        <h3><i class="fa-solid fa-key icon-gradient"></i> API Configuration</h3>
+                    </div>
+
+                    <div class="settings-body">
+                        <div class="form-group">
+                            <label for="providerSelect">LLM Provider</label>
+                            <select id="providerSelect" class="custom-select">
+                                <option value="gemini" selected>Google Gemini (3.1 Flash Lite)</option>
+                                <option value="openai">OpenAI (GPT-4o Mini)</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="apiKeyInput">API Key</label>
+                            <div class="api-key-input-wrapper">
+                                <input type="password" id="apiKeyInput" class="custom-input"
+                                    placeholder="Enter provider API key...">
+                                <button type="button" class="btn-toggle-password" id="togglePasswordBtn">
+                                    <i class="fa-solid fa-eye"></i>
+                                </button>
+                            </div>
+                            <small class="help-text">Keys are stored locally in your browser's localStorage and never
+                                shared.</small>
+                        </div>
+
+                        <button class="btn btn-secondary btn-full" id="saveSettingsBtn">
+                            <i class="fa-solid fa-check"></i> Save API Configuration
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Upload Card -->
+                <div class="upload-card glass-panel">
+                    <h3><i class="fa-solid fa-cloud-arrow-up icon-gradient"></i> Upload Document</h3>
+                    <p class="panel-subtitle">Upload your PDF file to extract structured summaries & action items.</p>
+
+                    <div class="dropzone" id="pdfDropzone">
+                        <input type="file" id="pdfFileInput" accept="application/pdf" style="display: none;">
+                        <div class="dropzone-content">
+                            <div class="dropzone-icon">
+                                <i class="fa-solid fa-file-pdf"></i>
+                            </div>
+                            <p class="dropzone-main-text">Drag & drop your PDF here</p>
+                            <p class="dropzone-sub-text">or <span class="browse-link">browse files</span></p>
+                            <p class="dropzone-limit-text">Max size: 10MB</p>
+                        </div>
+                        <!-- File selected info -->
+                        <div class="file-info-container" id="fileInfoContainer" style="display: none;">
+                            <i class="fa-regular fa-file-pdf file-icon"></i>
+                            <div class="file-meta">
+                                <span class="file-name" id="selectedFileName">document.pdf</span>
+                                <span class="file-size" id="selectedFileSize">0.0 MB</span>
+                            </div>
+                            <button class="btn-clear-file" id="clearFileBtn" title="Remove file">
+                                <i class="fa-solid fa-xmark"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <button class="btn btn-primary btn-full mt-4 disabled" id="processBtn">
+                        <span class="btn-text">Summarize PDF</span>
+                        <i class="fa-solid fa-bolt"></i>
+                    </button>
+                </div>
+
+                <!-- Progress / Status Card -->
+                <div class="progress-card glass-panel" id="progressCard" style="display: none;">
+                    <h3><i class="fa-solid fa-circle-notch fa-spin icon-gradient"></i> Processing Document</h3>
+                    <p class="panel-subtitle">This may take a few moments depending on document length.</p>
+
+                    <div class="progress-steps-list">
+                        <div class="step-item" id="step-parsing">
+                            <div class="step-bullet"><i class="fa-solid fa-circle-check"></i></div>
+                            <span class="step-label">Extracting & validating PDF text</span>
+                        </div>
+                        <div class="step-item" id="step-chunks">
+                            <div class="step-bullet"><i class="fa-solid fa-circle-notch fa-spin"></i></div>
+                            <span class="step-label" id="chunksStepLabel">Summarizing document sections</span>
+                        </div>
+                        <div class="step-item" id="step-actions">
+                            <div class="step-bullet"><i class="fa-solid fa-circle"></i></div>
+                            <span class="step-label">Extracting actionable items</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Panel: Summary & Action Results -->
+            <section class="results-panel">
+                <!-- Welcome/Empty State -->
+                <div class="empty-state glass-panel" id="emptyState">
+                    <div class="empty-illustration">
+                        <div class="floating-shapes">
+                            <i class="fa-solid fa-file-pdf doc-shape"></i>
+                            <i class="fa-solid fa-wand-magic-sparkles spark-shape"></i>
+                            <i class="fa-solid fa-list-check list-shape"></i>
+                        </div>
+                    </div>
+                    <h2>No Document Processed Yet</h2>
+                    <p>Configure your API credentials, upload a PDF document, and click the "Summarize PDF" button to
+                        start parsing and extracting actionable insights.</p>
+                </div>
+
+                <!-- Results Output Container -->
+                <div class="results-container" id="resultsContainer" style="display: none;">
+                    <div class="results-header-actions">
+                        <h2>Analysis Results</h2>
+                        <div class="action-buttons-group">
+                            <button class="btn btn-secondary btn-sm" id="copyJsonBtn">
+                                <i class="fa-regular fa-copy"></i> Copy JSON
+                            </button>
+                            <button class="btn btn-secondary btn-sm" id="downloadJsonBtn">
+                                <i class="fa-solid fa-download"></i> Download JSON
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Summary & Bullets Grid -->
+                    <div class="results-grid">
+                        <!-- Main Text Summary -->
+                        <div class="summary-section glass-panel">
+                            <h4><i class="fa-solid fa-quote-left icon-gradient"></i> Executive Summary</h4>
+                            <p class="summary-text" id="summaryTextOutput">
+                                Loading summary content...
+                            </p>
+                        </div>
+
+                        <!-- Bullet Points -->
+                        <div class="bullets-section glass-panel">
+                            <h4><i class="fa-solid fa-list-ul icon-gradient"></i> Key Takeaways</h4>
+                            <ul class="bullets-list" id="bulletsOutputList">
+                                <li>Loading bullet points...</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <!-- Action Items Table / Cards -->
+                    <div class="actions-section glass-panel">
+                        <div class="actions-section-header">
+                            <h4><i class="fa-solid fa-circle-check icon-gradient"></i> Action Items Extracted</h4>
+                            <span class="badge" id="actionItemsCount">0 Items</span>
+                        </div>
+
+                        <div class="actions-table-wrapper">
+                            <table class="actions-table" id="actionsTable">
+                                <thead>
+                                    <tr>
+                                        <th style="width: 50%;">Task / Deliverable</th>
+                                        <th style="width: 25%;">Responsible Party</th>
+                                        <th style="width: 25%;">Deadline</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="actionsTableBody">
+                                    <!-- Dynamic Rows -->
+                                </tbody>
+                            </table>
+                            <div class="no-actions-fallback" id="noActionsFallback" style="display: none;">
+                                <i class="fa-regular fa-circle-check fallback-icon"></i>
+                                <p>No specific action items, deadlines, or responsible parties were identified in this
+                                    document summary.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Notification Toast -->
+    <div class="toast" id="toast">
+        <i class="fa-solid fa-circle-info toast-icon"></i>
+        <span class="toast-message" id="toastMessage">Configuration saved successfully!</span>
+    </div>
+
+    <script src="/frontend/app.js"></script>
+</body>
+
+</html>
