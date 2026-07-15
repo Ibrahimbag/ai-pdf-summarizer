@@ -179,7 +179,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const file = files[0];
         
         // Validate is PDF
-        if (file.type !== "application/pdf" && !file.name.toLowerCase().endswith(".pdf")) {
+        if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
             showToast("Invalid file format. Only PDF documents are allowed.");
             return;
         }
@@ -258,11 +258,12 @@ document.addEventListener("DOMContentLoaded", () => {
         setStepState(stepActions, "inactive");
         
         // 2. Prepare FormData
+        // NOTE: provider/api_key are sent as headers, not form fields — the
+        // backend only reads X-Provider / X-API-Key (form fields are more
+        // likely to end up logged by proxies or access logs).
         const formData = new FormData();
         formData.append("file", selectedFile);
         formData.append("tone", selectedTone);
-        formData.append("provider", provider);
-        formData.append("api_key", apiKey);
 
         try {
             // Mock progression transitions for a smoother UX
@@ -289,6 +290,10 @@ document.addEventListener("DOMContentLoaded", () => {
             // Trigger Backend call
             const response = await fetch("/api/summarize", {
                 method: "POST",
+                headers: {
+                    "X-Provider": provider,
+                    "X-API-Key": apiKey
+                },
                 body: formData
             });
 

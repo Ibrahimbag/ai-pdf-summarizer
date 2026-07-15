@@ -1,17 +1,37 @@
-import os
 import json
 import re
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
+from typing import Literal, TypedDict
+
 import openai
 from google import genai
 from google.genai import types
 
-# Setup fallback clients/credentials
-# We will initialize them dynamically per request if keys are passed from the client,
-# or use these default initializations if the env variables are present.
+__all__ = ["summarize_pdf_workflow"]
 
-def get_client(provider: str, api_key: str):
+ToneType = Literal["simple", "academic", "executive"]
+
+TONE_GUIDELINES: dict[str, str] = {
+    "simple": "Tone Guideline: Use plain, easy-to-read, everyday language. Avoid complex jargon. Write simply and clearly, explaining any terms where necessary.",
+    "academic": "Tone Guideline: Use a formal, scholarly, highly structured tone. Maintain technical precision, academic terminology, and objective narration.",
+    "executive": "Tone Guideline: Use an executive tone. Be brief, high-level, and decision-focused. Highlight key risks, opportunities, actions, and strategic takeaways.",
+}
+DEFAULT_TONE_GUIDELINE = "Tone Guideline: Produce a professional and balanced summary."
+
+
+class SummaryResult(TypedDict):
+    summary: str
+    bullet_points: list[str]
+
+
+@lru_cache(maxsize=8)
+def get_client(provider: str, api_key: str) -> openai.OpenAI | genai.Client:
     """
-    Returns an configured client or model runner depending on the provider.
+    Returns a configured client, reused across calls for the same
+    (provider, api_key) pair so the underlying HTTP connection pool isn't
+    torn down and rebuilt on every LLM call.
     """
     if provider == "openai":
         return openai.OpenAI(api_key=api_key)
@@ -20,26 +40,40 @@ def get_client(provider: str, api_key: str):
     else:
         raise ValueError(f"Unsupported LLM provider: {provider}")
 
+
 def clean_json_response(text: str) -> dict | list:
     """
     Extracts and parses JSON content from a text response, handling markdown fences.
     """
     text = text.strip()
-    # Try finding json code block
     json_block = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
     if json_block:
         text = json_block.group(1).strip()
-        
-    # Attempt parsing
+
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # Try to fix some common LLM JSON syntax issues
-        # (e.g., trailing commas, unescaped quotes)
-        # For simplicity, if it fails, we will raise an exception and let the caller handle it.
         raise
 
-def call_llm(provider: str, api_key: str, prompt: str, system_instruction: str = None, json_mode: bool = False) -> str:
+
+def clean_json_dict(text: str) -> dict:
+    """
+    Like clean_json_response, but raises a clear error if the LLM didn't
+    return a JSON object (e.g. returned a bare JSON array instead).
+    """
+    result = clean_json_response(text)
+    if not isinstance(result, dict):
+        raise ValueError(f"Expected JSON object, got {type(result).__name__}")
+    return result
+
+
+def call_llm(
+    provider: str,
+    api_key: str,
+    prompt: str,
+    system_instruction: str | None = None,
+    json_mode: bool = False,
+) -> str:
     """
     Calls the selected LLM provider with the given prompt and parameters.
     """
@@ -49,60 +83,61 @@ def call_llm(provider: str, api_key: str, prompt: str, system_instruction: str =
         if system_instruction:
             messages.append({"role": "system", "content": system_instruction})
         messages.append({"role": "user", "content": prompt})
-        
+
         extra_args = {}
         if json_mode:
             extra_args["response_format"] = {"type": "json_object"}
-            
+
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
             temperature=0.2,
-            **extra_args
+            **extra_args,
         )
-        return response.choices[0].message.content.strip()
-        
+        content = response.choices[0].message.content
+        if not content or not content.strip():
+            raise ValueError("LLM returned an empty response (possible content filter block).")
+        return content.strip()
+
     elif provider == "gemini":
         client = get_client("gemini", api_key)
-        
+
+        # Build the config fully at construction time — mutating a
+        # GenerateContentConfig's fields after construction can silently
+        # fail validation depending on the SDK's pydantic model settings.
         config = types.GenerateContentConfig(
-            temperature=0.2
+            temperature=0.2,
+            response_mime_type="application/json" if json_mode else None,
+            system_instruction=system_instruction if system_instruction else None,
         )
-        if json_mode:
-            config.response_mime_type = "application/json"
-            
-        if system_instruction:
-            config.system_instruction = system_instruction
-            
+
         response = client.models.generate_content(
             model="gemini-3.1-flash-lite",
             contents=prompt,
-            config=config
+            config=config,
         )
-        return response.text.strip()
+        text = response.text
+        if not text or not text.strip():
+            raise ValueError("Gemini returned an empty response (possible safety filter block).")
+        return text.strip()
     else:
         raise ValueError(f"Invalid provider: {provider}")
 
+
 def get_tone_guidelines(tone: str) -> str:
     """
-    Returns guidelines based on the selected tone.
+    Returns guidelines based on the selected tone. Unrecognized tone values
+    fall back to a default guideline rather than raising.
     """
-    tone = tone.lower()
-    if tone == "simple":
-        return "Tone Guideline: Use plain, easy-to-read, everyday language. Avoid complex jargon. Write simply and clearly, explaining any terms where necessary."
-    elif tone == "academic":
-        return "Tone Guideline: Use a formal, scholarly, highly structured tone. Maintain technical precision, academic terminology, and objective narration."
-    elif tone == "executive":
-        return "Tone Guideline: Use an executive tone. Be brief, high-level, and decision-focused. Highlight key risks, opportunities, actions, and strategic takeaways."
-    else:
-        return "Tone Guideline: Produce a professional and balanced summary."
+    return TONE_GUIDELINES.get(tone.lower(), DEFAULT_TONE_GUIDELINE)
+
 
 def summarize_chunk(provider: str, api_key: str, chunk: str, tone: str) -> str:
     """
     Summarizes an individual text chunk using the selected LLM.
     """
     tone_instructions = get_tone_guidelines(tone)
-    
+
     system_instruction = (
         "You are a document summarization assistant. Your task is to summarize chunks of text accurately and concisely.\n"
         "Rules:\n"
@@ -110,7 +145,7 @@ def summarize_chunk(provider: str, api_key: str, chunk: str, tone: str) -> str:
         "- Avoid repetition or introductory fluff.\n"
         "- Output structured text."
     )
-    
+
     prompt = f"""Given the following chunk of text, produce:
 1. A short summary (2-3 sentences)
 2. A list of key bullet points
@@ -123,13 +158,14 @@ TEXT CHUNK:
 """
     return call_llm(provider, api_key, prompt, system_instruction=system_instruction)
 
-def merge_summaries(provider: str, api_key: str, chunk_summaries: list[str], tone: str) -> dict:
+
+def merge_summaries(provider: str, api_key: str, chunk_summaries: list[str], tone: str) -> SummaryResult:
     """
     Merges multiple chunk summaries into a single final summary and bullet point list.
     """
     tone_instructions = get_tone_guidelines(tone)
     combined_summaries_text = "\n\n=== SECTION SUMMARY ===\n".join(chunk_summaries)
-    
+
     system_instruction = (
         "You are a document summarization assistant. Your task is to merge section summaries into a single final structured JSON summary.\n"
         "You MUST respond with a JSON object containing two keys:\n"
@@ -137,7 +173,7 @@ def merge_summaries(provider: str, api_key: str, chunk_summaries: list[str], ton
         "- 'bullet_points': an array of strings representing key bullet points for the entire document.\n"
         "Ensure there is no redundancy or repetition across bullet points."
     )
-    
+
     prompt = f"""Merge the following section summaries into a single cohesive, non-redundant summary.
 
 {tone_instructions}
@@ -156,7 +192,14 @@ SECTION SUMMARIES TO MERGE:
 {combined_summaries_text}
 """
     response_text = call_llm(provider, api_key, prompt, system_instruction=system_instruction, json_mode=True)
-    return clean_json_response(response_text)
+    result = clean_json_dict(response_text)
+    if "summary" not in result or "bullet_points" not in result:
+        raise ValueError(f"LLM response missing required keys: {list(result.keys())}")
+    return SummaryResult(
+        summary=str(result["summary"]),
+        bullet_points=list(result["bullet_points"]),
+    )
+
 
 def extract_action_items(provider: str, api_key: str, final_summary_text: str, full_document_text: str = "") -> list:
     """
@@ -175,7 +218,10 @@ def extract_action_items(provider: str, api_key: str, final_summary_text: str, f
         "- Only extract clear, actionable items.\n"
         "- Do NOT hallucinate deadlines or responsible parties. If not explicitly mentioned, use null."
     )
-    
+
+    # Context is capped to 15000 chars to avoid exceeding token limits.
+    context_snippet = full_document_text[:15000]
+
     prompt = f"""Given the following document summary and context, extract all actionable items.
 
 Ensure the output is JSON in this format:
@@ -195,7 +241,7 @@ DOCUMENT SUMMARY:
 
 ---
 ADDITIONAL CONTEXT (if helpful):
-{full_document_text[:15000]}  # limit context to avoid exceeding token limits
+{context_snippet}
 """
     response_text = call_llm(provider, api_key, prompt, system_instruction=system_instruction, json_mode=True)
     parsed = clean_json_response(response_text)
@@ -205,24 +251,43 @@ ADDITIONAL CONTEXT (if helpful):
         return parsed
     return []
 
-def summarize_pdf_workflow(provider: str, api_key: str, chunks: list[str], full_text: str, tone: str, progress_callback = None) -> dict:
+
+def summarize_pdf_workflow(
+    provider: str,
+    api_key: str,
+    chunks: list[str],
+    full_text: str,
+    tone: str,
+    progress_callback: Callable[[str], None] | None = None,
+) -> dict:
     """
     Main orchestrator for the PDF summarization workflow.
     """
-    # 1. Summarize chunks
-    chunk_summaries = []
+    # 1. Summarize chunks in parallel — chunks are independent, so there's
+    # no need to wait on them sequentially.
     total_chunks = len(chunks)
-    
-    for i, chunk in enumerate(chunks):
-        if progress_callback:
-            progress_callback(f"Summarizing section {i+1} of {total_chunks}...")
-        summary = summarize_chunk(provider, api_key, chunk, tone)
-        chunk_summaries.append(summary)
-        
+    chunk_summaries: list[str | None] = [None] * total_chunks
+
+    if progress_callback:
+        progress_callback(f"Summarizing {total_chunks} section(s)...")
+
+    with ThreadPoolExecutor(max_workers=min(total_chunks, 5) or 1) as executor:
+        futures = {
+            executor.submit(summarize_chunk, provider, api_key, chunk, tone): i
+            for i, chunk in enumerate(chunks)
+        }
+        completed = 0
+        for future in as_completed(futures):
+            idx = futures[future]
+            chunk_summaries[idx] = future.result()
+            completed += 1
+            if progress_callback:
+                progress_callback(f"Summarized section {completed} of {total_chunks}...")
+
     # 2. Merge chunk summaries
     if progress_callback:
         progress_callback("Synthesizing final summary...")
-        
+
     if total_chunks == 1:
         # If there's only one chunk, format it into the expected JSON
         # Instead of calling LLM merge, we can do a simplified structured call
@@ -245,19 +310,25 @@ Format:
   "bullet_points": ["bullet 1", "bullet 2"]
 }}
 """
-        merged = clean_json_response(call_llm(provider, api_key, prompt, system_instruction=system_instruction, json_mode=True))
+        result = clean_json_dict(
+            call_llm(provider, api_key, prompt, system_instruction=system_instruction, json_mode=True)
+        )
+        merged = SummaryResult(
+            summary=str(result.get("summary", "")),
+            bullet_points=list(result.get("bullet_points", [])),
+        )
     else:
         merged = merge_summaries(provider, api_key, chunk_summaries, tone)
-        
+
     # 3. Extract action items
     if progress_callback:
         progress_callback("Extracting actionable items...")
-        
-    actions = extract_action_items(provider, api_key, merged.get("summary", ""), full_document_text=full_text)
-    
+
+    actions = extract_action_items(provider, api_key, merged["summary"], full_document_text=full_text)
+
     # 4. Return final structured JSON
     return {
-        "summary": merged.get("summary", ""),
-        "bullet_points": merged.get("bullet_points", []),
-        "actions": actions
+        "summary": merged["summary"],
+        "bullet_points": merged["bullet_points"],
+        "actions": actions,
     }
