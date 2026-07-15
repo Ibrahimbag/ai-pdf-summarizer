@@ -42,15 +42,9 @@ def validate_and_extract_pdf(file_content: bytes, filename: str | None) -> str:
         raise PDFValidationError("File does not appear to be a valid PDF (invalid magic bytes).")
 
     try:
-        pdf_file = BytesIO(file_content)
-        reader = PdfReader(pdf_file)
-
-        extracted_text = []
-        for page in reader.pages:
-            text = page.extract_text()
-            if text:
-                extracted_text.append(text)
-
+        reader = PdfReader(BytesIO(file_content))
+        # Use assignment expression in list comprehension to concisely extract non-empty page text
+        extracted_text = [text for page in reader.pages if (text := page.extract_text())]
         full_text = "\n".join(extracted_text).strip()
 
         if not full_text:
@@ -70,42 +64,34 @@ def split_text_into_chunks(text: str, chunk_size_chars: int = 6000, overlap_char
     Splits the extracted text into chunks of roughly 1000–2000 tokens (4000-8000 characters).
     Ensures that sentences are not broken badly by splitting on sentence boundaries.
     """
-    sentences = _SENTENCE_SPLIT_RE.split(text)
+    # Pre-filter and strip sentences
+    sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
 
     chunks = []
     current_chunk = []
     current_length = 0
 
     for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-
         sentence_len = len(sentence)
 
         # If a single sentence is extremely long (longer than chunk_size_chars),
-        # we have to split it by character chunking
+        # split it by character chunking
         if sentence_len > chunk_size_chars:
-            # Finish current chunk if there is anything in it
             if current_chunk:
                 chunks.append(" ".join(current_chunk))
-                current_chunk = []
-                current_length = 0
+                current_chunk, current_length = [], 0
 
-            # Split the giant sentence into character chunks
             start = 0
             while start < sentence_len:
-                end = min(start + chunk_size_chars, sentence_len)
-                chunks.append(sentence[start:end])
+                chunks.append(sentence[start : start + chunk_size_chars])
                 start += chunk_size_chars - overlap_chars
             continue
 
+        # Check if adding the sentence exceeds the target size limit
         if current_length + sentence_len + 1 > chunk_size_chars:
-            # Current chunk is full, save it
             chunks.append(" ".join(current_chunk))
 
-            # Start new chunk with overlap if possible
-            # Find how many sentences to keep from the end of current_chunk for overlap
+            # Build overlapping starting sentences for the next chunk
             overlap_text = []
             overlap_len = 0
             for prev_sentence in reversed(current_chunk):
@@ -116,7 +102,8 @@ def split_text_into_chunks(text: str, chunk_size_chars: int = 6000, overlap_char
                     break
 
             current_chunk = overlap_text + [sentence]
-            current_length = sum(len(s) for s in current_chunk) + len(current_chunk) - 1
+            # O(1) length update instead of recalculating sum across the new list of strings
+            current_length = overlap_len + sentence_len
         else:
             current_chunk.append(sentence)
             current_length += sentence_len + (1 if current_length > 0 else 0)

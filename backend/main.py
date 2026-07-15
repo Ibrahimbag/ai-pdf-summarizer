@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Request
@@ -60,56 +61,29 @@ async def summarize_pdf(
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     try:
-        # API keys must never travel in the form body (proxies/access logs
-        # routinely capture form fields) — only accept them via headers.
-        selected_provider = x_provider
+        # Resolve provider with ternary expressions falling back to env variables
+        selected_provider = x_provider or (
+            "gemini" if os.getenv("GEMINI_API_KEY")
+            else "openai" if os.getenv("OPENAI_API_KEY")
+            else "gemini"
+        )
 
-        # Fallbacks for provider
-        if not selected_provider:
-            import os
+        # Resolve API Key based on resolved provider
+        selected_api_key = x_api_key or os.getenv(
+            "GEMINI_API_KEY" if selected_provider == "gemini" else "OPENAI_API_KEY"
+        )
 
-            if os.environ.get("GEMINI_API_KEY"):
-                selected_provider = "gemini"
-            elif os.environ.get("OPENAI_API_KEY"):
-                selected_provider = "openai"
-            else:
-                selected_provider = "gemini"
-
-        # Fallbacks for API Key
-        selected_api_key = x_api_key
-        if not selected_api_key:
-            import os
-
-            if selected_provider == "gemini":
-                selected_api_key = os.environ.get("GEMINI_API_KEY")
-            elif selected_provider == "openai":
-                selected_api_key = os.environ.get("OPENAI_API_KEY")
-
-        # Validate that we have an API Key
         if not selected_api_key:
             raise HTTPException(
                 status_code=400,
                 detail=f"API key missing for provider '{selected_provider}'. Please set it in the settings panel or environment variables.",
             )
 
-        # Read the file contents
         content = await file.read()
-
-        # Validate and extract text
-        try:
-            full_text = validate_and_extract_pdf(content, file.filename)
-        except PDFValidationError as pve:
-            raise HTTPException(status_code=400, detail=str(pve))
-
-        # Split text into chunks
-        # 6000 chars is roughly 1500 tokens
+        full_text = validate_and_extract_pdf(content, file.filename)
         chunks = split_text_into_chunks(full_text, chunk_size_chars=6000, overlap_chars=500)
 
-        def progress_log(message: str):
-            logger.info("Summary progress: %s", message)
-
-        # Run workflow in a thread so the blocking LLM calls don't stall the
-        # event loop for other concurrent requests.
+        # Run LLM calls in a thread pool to avoid blocking the event loop
         result = await asyncio.to_thread(
             summarize_pdf_workflow,
             provider=selected_provider,
@@ -117,16 +91,15 @@ async def summarize_pdf(
             chunks=chunks,
             full_text=full_text,
             tone=tone,
-            progress_callback=progress_log,
+            progress_callback=lambda msg: logger.info("Summary progress: %s", msg),
         )
-
         return JSONResponse(content=result)
 
-    except HTTPException as he:
-        raise he
+    except HTTPException:
+        raise
+    except PDFValidationError as pve:
+        raise HTTPException(status_code=400, detail=str(pve))
     except Exception:
-        # Never echo str(e) back to the client: provider SDK exceptions can
-        # contain partial API keys, auth headers, or internal endpoint URLs.
         logger.exception("Unexpected server error during summarization")
         raise HTTPException(
             status_code=500,

@@ -33,12 +33,13 @@ def get_client(provider: str, api_key: str) -> openai.OpenAI | genai.Client:
     (provider, api_key) pair so the underlying HTTP connection pool isn't
     torn down and rebuilt on every LLM call.
     """
-    if provider == "openai":
-        return openai.OpenAI(api_key=api_key)
-    elif provider == "gemini":
-        return genai.Client(api_key=api_key)
-    else:
-        raise ValueError(f"Unsupported LLM provider: {provider}")
+    match provider:
+        case "openai":
+            return openai.OpenAI(api_key=api_key)
+        case "gemini":
+            return genai.Client(api_key=api_key)
+        case _:
+            raise ValueError(f"Unsupported LLM provider: {provider}")
 
 
 def clean_json_response(text: str) -> dict | list:
@@ -46,14 +47,9 @@ def clean_json_response(text: str) -> dict | list:
     Extracts and parses JSON content from a text response, handling markdown fences.
     """
     text = text.strip()
-    json_block = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
-    if json_block:
+    if json_block := re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text):
         text = json_block.group(1).strip()
-
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        raise
+    return json.loads(text)
 
 
 def clean_json_dict(text: str) -> dict:
@@ -61,11 +57,14 @@ def clean_json_dict(text: str) -> dict:
     Like clean_json_response, but raises a clear error if the LLM didn't
     return a JSON object (e.g. returned a bare JSON array instead).
     """
-    result = clean_json_response(text)
-    if not isinstance(result, dict):
+    if not isinstance(result := clean_json_response(text), dict):
         raise ValueError(f"Expected JSON object, got {type(result).__name__}")
     return result
 
+def _validate_llm_text(text: str | None, provider_name: str) -> str:
+    if not text or not text.strip():
+        raise ValueError(f"{provider_name} returned an empty response (possible content/safety filter block).")
+    return text.strip()
 
 def call_llm(
     provider: str,
@@ -77,51 +76,45 @@ def call_llm(
     """
     Calls the selected LLM provider with the given prompt and parameters.
     """
-    if provider == "openai":
-        client = get_client("openai", api_key)
-        messages = []
-        if system_instruction:
-            messages.append({"role": "system", "content": system_instruction})
-        messages.append({"role": "user", "content": prompt})
+    match provider:
+        case "openai":
+            client = get_client("openai", api_key)
+            messages = [{"role": "system", "content": system_instruction}] if system_instruction else []
+            messages.append({"role": "user", "content": prompt})
 
-        extra_args = {}
-        if json_mode:
-            extra_args["response_format"] = {"type": "json_object"}
+            extra_args = {"response_format": {"type": "json_object"}} if json_mode else {}
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            temperature=0.2,
-            **extra_args,
-        )
-        content = response.choices[0].message.content
-        if not content or not content.strip():
-            raise ValueError("LLM returned an empty response (possible content filter block).")
-        return content.strip()
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.2,
+                **extra_args,
+            )
 
-    elif provider == "gemini":
-        client = get_client("gemini", api_key)
+            return _validate_llm_text(response.choices[0].message.content, "OpenAI")
 
-        # Build the config fully at construction time — mutating a
-        # GenerateContentConfig's fields after construction can silently
-        # fail validation depending on the SDK's pydantic model settings.
-        config = types.GenerateContentConfig(
-            temperature=0.2,
-            response_mime_type="application/json" if json_mode else None,
-            system_instruction=system_instruction if system_instruction else None,
-        )
+        case "gemini":
+            client = get_client("gemini", api_key)
 
-        response = client.models.generate_content(
-            model="gemini-3.1-flash-lite",
-            contents=prompt,
-            config=config,
-        )
-        text = response.text
-        if not text or not text.strip():
-            raise ValueError("Gemini returned an empty response (possible safety filter block).")
-        return text.strip()
-    else:
-        raise ValueError(f"Invalid provider: {provider}")
+            # Build the config fully at construction time — mutating a
+            # GenerateContentConfig's fields after construction can silently
+            # fail validation depending on the SDK's pydantic model settings.
+            config = types.GenerateContentConfig(
+                temperature=0.2,
+                response_mime_type="application/json" if json_mode else None,
+                system_instruction=system_instruction if system_instruction else None,
+            )
+
+            response = client.models.generate_content(
+                model="gemini-3.1-flash-lite",
+                contents=prompt,
+                config=config,
+            )
+            
+            return _validate_llm_text(response.text, "Gemini")
+        
+        case _:
+            raise ValueError(f"Invalid provider: {provider}")
 
 
 def get_tone_guidelines(tone: str) -> str:
@@ -244,12 +237,14 @@ ADDITIONAL CONTEXT (if helpful):
 {context_snippet}
 """
     response_text = call_llm(provider, api_key, prompt, system_instruction=system_instruction, json_mode=True)
-    parsed = clean_json_response(response_text)
-    if isinstance(parsed, dict) and "actions" in parsed:
-        return parsed["actions"]
-    elif isinstance(parsed, list):
-        return parsed
-    return []
+    
+    match clean_json_response(response_text):
+        case {"actions": list(actions)}:
+            return actions
+        case list(actions):
+            return actions
+        case _:
+            return []
 
 
 def summarize_pdf_workflow(
@@ -263,13 +258,15 @@ def summarize_pdf_workflow(
     """
     Main orchestrator for the PDF summarization workflow.
     """
-    # 1. Summarize chunks in parallel — chunks are independent, so there's
-    # no need to wait on them sequentially.
+    # Local helper for progress callback to clean up repeated conditional checks
+    def log(message: str) -> None:
+        if progress_callback:
+            progress_callback(message)
+
     total_chunks = len(chunks)
     chunk_summaries: list[str | None] = [None] * total_chunks
 
-    if progress_callback:
-        progress_callback(f"Summarizing {total_chunks} section(s)...")
+    log(f"Summarizing {total_chunks} section(s)...")
 
     with ThreadPoolExecutor(max_workers=min(total_chunks, 5) or 1) as executor:
         futures = {
@@ -281,16 +278,12 @@ def summarize_pdf_workflow(
             idx = futures[future]
             chunk_summaries[idx] = future.result()
             completed += 1
-            if progress_callback:
-                progress_callback(f"Summarized section {completed} of {total_chunks}...")
+            log(f"Summarized section {completed} of {total_chunks}...")
 
-    # 2. Merge chunk summaries
-    if progress_callback:
-        progress_callback("Synthesizing final summary...")
+    log("Synthesizing final summary...")
 
     if total_chunks == 1:
-        # If there's only one chunk, format it into the expected JSON
-        # Instead of calling LLM merge, we can do a simplified structured call
+        # If there's only one chunk, format it into the expected JSON structure
         tone_instructions = get_tone_guidelines(tone)
         system_instruction = (
             "You are a document summarization assistant. Structure the summary into a JSON object.\n"
@@ -320,13 +313,9 @@ Format:
     else:
         merged = merge_summaries(provider, api_key, chunk_summaries, tone)
 
-    # 3. Extract action items
-    if progress_callback:
-        progress_callback("Extracting actionable items...")
-
+    log("Extracting actionable items...")
     actions = extract_action_items(provider, api_key, merged["summary"], full_document_text=full_text)
 
-    # 4. Return final structured JSON
     return {
         "summary": merged["summary"],
         "bullet_points": merged["bullet_points"],
