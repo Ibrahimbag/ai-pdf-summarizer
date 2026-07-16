@@ -43,6 +43,12 @@ def validate_and_extract_pdf(file_content: bytes, filename: str | None) -> str:
 
     try:
         reader = PdfReader(BytesIO(file_content))
+        
+        # Enforce page count limit (max 100 pages)
+        MAX_PAGES = 100
+        if len(reader.pages) > MAX_PAGES:
+            raise PDFValidationError(f"The PDF exceeds the maximum page limit of {MAX_PAGES} pages.")
+            
         # Use assignment expression in list comprehension to concisely extract non-empty page text
         extracted_text = [text for page in reader.pages if (text := page.extract_text())]
         full_text = "\n".join(extracted_text).strip()

@@ -7,3 +7,4 @@ pypdf==6.14.2
 openai==2.45.0
 google-genai==2.8.0
 slowapi==0.1.10
+tenacity==8.3.0

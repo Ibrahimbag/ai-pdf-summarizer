@@ -2,13 +2,13 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from .pdf_parser import validate_and_extract_pdf, split_text_into_chunks, PDFValidationError
@@ -19,18 +19,39 @@ logger = logging.getLogger(__name__)
 BACKEND_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = BACKEND_DIR.parent / "frontend"
 
-limiter = Limiter(key_func=get_remote_address)
+
+def get_real_client_ip(request: Request) -> str:
+    """
+    Returns the real client IP, considering X-Forwarded-For if request comes
+    from a trusted proxy IP defined in the TRUSTED_PROXIES environment variable.
+    """
+    trusted_proxies_str = os.getenv("TRUSTED_PROXIES", "")
+    trusted_proxies = {ip.strip() for ip in trusted_proxies_str.split(",") if ip.strip()}
+    
+    client_host = request.client.host if request.client else "127.0.0.1"
+    
+    if "*" in trusted_proxies or client_host in trusted_proxies:
+        x_forwarded_for = request.headers.get("X-Forwarded-For")
+        if x_forwarded_for:
+            # First element represents the client
+            return x_forwarded_for.split(",")[0].strip()
+            
+    return client_host
+
+
+limiter = Limiter(key_func=get_real_client_ip)
 
 app = FastAPI(title="AI PDF Summarizer API", version="1.0.0")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# CORS: no credentials are used (API keys are supplied per-request via headers),
-# so allow_credentials must be False. Restrict origins to known local dev hosts;
-# update this list for any real deployment.
+# CORS configuration dynamically configured via environment variables
+cors_origins_str = os.getenv("ALLOWED_CORS_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000")
+cors_origins = [origin.strip() for origin in cors_origins_str.split(",") if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8000", "http://127.0.0.1:8000"],
+    allow_origins=cors_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type", "X-Provider", "X-API-Key"],
@@ -56,30 +77,56 @@ def read_root():
 async def summarize_pdf(
     request: Request,
     file: UploadFile = File(...),
-    tone: str = Form("simple"),
+    tone: Literal["simple", "academic", "executive"] = Form("simple"),
     x_provider: str = Header(None, alias="X-Provider"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     try:
-        # Resolve provider with ternary expressions falling back to env variables
-        selected_provider = x_provider or (
-            "gemini" if os.getenv("GEMINI_API_KEY")
-            else "openai" if os.getenv("OPENAI_API_KEY")
-            else "gemini"
-        )
-
-        # Resolve API Key based on resolved provider
-        selected_api_key = x_api_key or os.getenv(
-            "GEMINI_API_KEY" if selected_provider == "gemini" else "OPENAI_API_KEY"
-        )
-
+        allow_server_keys = os.getenv("ALLOW_SERVER_KEYS", "false").lower() == "true"
+        
+        selected_provider = x_provider
+        selected_api_key = x_api_key
+        
+        if not selected_api_key:
+            if not allow_server_keys:
+                raise HTTPException(
+                    status_code=401,
+                    detail="API key is required in the X-API-Key header. Server-side API keys are disabled.",
+                )
+            
+            # Resolve provider from server environment
+            selected_provider = selected_provider or (
+                "gemini" if os.getenv("GEMINI_API_KEY")
+                else "openai" if os.getenv("OPENAI_API_KEY")
+                else "gemini"
+            )
+            # Resolve key from server environment
+            selected_api_key = os.getenv(
+                "GEMINI_API_KEY" if selected_provider == "gemini" else "OPENAI_API_KEY"
+            )
+        else:
+            selected_provider = selected_provider or "gemini"
+            
         if not selected_api_key:
             raise HTTPException(
                 status_code=400,
-                detail=f"API key missing for provider '{selected_provider}'. Please set it in the settings panel or environment variables.",
+                detail=f"API key missing for provider '{selected_provider}'. Please set it in the settings panel.",
             )
 
-        content = await file.read()
+        # Stream file reading in chunks to prevent unbounded memory allocation
+        MAX_SIZE = 10 * 1024 * 1024  # 10MB
+        content_chunks = []
+        size = 0
+        while chunk := await file.read(65536):
+            size += len(chunk)
+            if size > MAX_SIZE:
+                raise HTTPException(
+                    status_code=400,
+                    detail="The file exceeds the maximum allowed size of 10MB.",
+                )
+            content_chunks.append(chunk)
+        content = b"".join(content_chunks)
+
         full_text = validate_and_extract_pdf(content, file.filename)
         chunks = split_text_into_chunks(full_text, chunk_size_chars=6000, overlap_chars=500)
 
@@ -98,7 +145,14 @@ async def summarize_pdf(
     except HTTPException:
         raise
     except PDFValidationError as pve:
-        raise HTTPException(status_code=400, detail=str(pve))
+        if pve.cause is not None:
+            logger.error("PDF validation/parsing failed: %s", str(pve), exc_info=pve.cause)
+            raise HTTPException(
+                status_code=400,
+                detail="The uploaded PDF is malformed or could not be parsed."
+            )
+        else:
+            raise HTTPException(status_code=400, detail=str(pve))
     except Exception:
         logger.exception("Unexpected server error during summarization")
         raise HTTPException(
@@ -110,4 +164,3 @@ async def summarize_pdf(
 # Mount the static files for CSS, JS, images, etc.
 if FRONTEND_DIR.exists():
     app.mount("/frontend", StaticFiles(directory=str(FRONTEND_DIR)), name="frontend")
-    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
